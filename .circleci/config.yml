@@ -3,18 +3,21 @@ aliases:
   - &release
     name: Release
     command: |
-      if [ "$(git log -1 --pretty=%B)" == "Start release" ]
+      if [ "$(git log -n 1 --pretty="%an")" == "Renovate Bot" ]
       then
-        echo "Start release"
-        git config --global user.email "circleci@entur.no"
-        git config --global user.name "circleci"
-        git checkout master
-        git pull --no-edit
-        git checkout develop
-        mvn versions:use-releases
-        mvn gitflow:release-start gitflow:release-finish -Prelease -DpostReleaseGoals=deploy -DargLine=-Prelease -B
-      else
         echo "Skipping release"
+      else
+         echo "Start release"
+         git config --global user.email "circleci@entur.no"
+         git config --global user.name "circleci"
+         git checkout -B master origin/master
+         git pull --no-edit
+         git checkout develop
+         mvn versions:use-releases
+         mvn gitflow:release-start gitflow:release-finish -Prelease -DpostReleaseGoals=deploy -DargLine='-Prelease -DskipTests' -B
+         git checkout master
+         git pull --no-edit
+         mvn deploy -DskipTests -Pentur-maven-central-local
       fi
 
   - &import_gpg_key
@@ -33,15 +36,20 @@ aliases:
                      <id>ossrh</id>
                    </server>
                 <server>
-                  <username>$entur_artifactory_user</username>
-                  <password>$entur_artifactory_password</password>
+                  <username>$ARTIFACTORY_USER</username>
+                  <password>$ARTIFACTORY_PASSWORD</password>
                   <id>central</id>
                 </server>
                 <server>
-                  <username>$entur_artifactory_user</username>
-                  <password>$entur_artifactory_password</password>
+                  <username>$ARTIFACTORY_USER</username>
+                  <password>$ARTIFACTORY_PASSWORD</password>
                   <id>snapshots</id>
                 </server>
+                <server>
+                        <username>$ARTIFACTORY_USER</username>
+                        <password>$ARTIFACTORY_PASSWORD</password>
+                        <id>entur-maven-central-local</id>
+                      </server>
               </servers>
               <profiles>
           <profile>
@@ -87,7 +95,10 @@ aliases:
 
   - &java-container-config
       docker:
-        - image: circleci/openjdk:8-jdk
+        - image: circleci/openjdk:11-jdk
+          auth:
+            username: $DOCKERHUB_LOGIN
+            password: $DOCKERHUB_PASSWORD
 
   - &sonar-scan
     command: |
@@ -145,26 +156,6 @@ jobs:
           path: ~/junit
       - store_artifacts:
           path: ~/junit
-  deploy-artifactory:
-    <<: *java-container-config
-    environment:
-      MAVEN_OPTS: -Xmx3G
-    steps:
-      - checkout
-      - generate-maven-settings-file:
-          settings-file: *maven-settings-file
-      - restore_cache:
-          keys:
-            - dep-cache-{{ checksum "pom.xml" }}
-            - dep-cache-base
-      - run: mvn org.apache.maven.plugins:maven-dependency-plugin:3.1.0:go-offline
-      - save_cache:
-          paths:
-            - ~/.m2
-          key: dep-cache-{{ checksum "pom.xml" }}
-      # Cannot use -o because of snapshot dependencies.
-      - run: mvn deploy -DskipTests
-
   sonar:
     <<: *java-container-config
     environment:
@@ -194,6 +185,8 @@ jobs:
             - dep-cache-{{ checksum "pom.xml" }}
             - dep-cache-base
       - run: *release
+orbs:
+  queue: eddiewebb/queue@volatile
 
 workflows:
   version: 2
@@ -206,26 +199,26 @@ workflows:
               only: develop
     jobs:
       - test:
-          context: org-default-build
+          context: global
       - sonar:
-          context: org-default-build
+          context: global
           requires:
             - test
 
 
   build_test_deploy:
     jobs:
+      - queue/block_workflow:
+          only-on-branch: develop
+          time: '30'
+          circleci-api-key: CIRCLE_API_USER_TOKEN
+          context: global
       - test:
-          context: org-default-build
-      - deploy-artifactory:
-          context: org-default-build
+          context: global
           requires:
-            - test
-          filters:
-            branches:
-              only: develop
+            - queue/block_workflow
       - release:
-          context: org-default-build
+          context: global
           requires:
             - test
           filters:
